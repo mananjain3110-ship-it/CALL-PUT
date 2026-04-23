@@ -1,107 +1,82 @@
 import streamlit as st
 import pandas as pd
 from nsepython import nse_optionchain_scrapper, nse_quote_ltp
-import datetime
 
-# --- CONFIG & STATE ---
-st.set_page_config(page_title="Nifty Live Simulator", layout="wide")
+# --- SETUP & SESSION ---
+st.set_page_config(page_title="Nifty Trading Terminal", layout="wide")
 
 if 'balance' not in st.session_state:
     st.session_state.balance = 100000.0
-if 'positions' not in st.session_state:
-    st.session_state.positions = []
+if 'portfolio' not in st.session_state:
+    st.session_state.portfolio = []
 
-# CSS to inject for the "Sticky" Toolbar
-st.markdown("""
-    <style>
-    .stAppHeader {
-        background-color: #f0f2f6;
-    }
-    div[data-testid="stVerticalBlock"] > div:has(div.trading-toolbar) {
-        position: sticky;
-        top: 2.8rem;
-        z-index: 999;
-        background: white;
-        padding: 10px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- LIVE DATA FETCH ---
-def get_data():
+# --- FETCH DATA ---
+@st.cache_data(ttl=30)
+def fetch_data():
     try:
-        # Fetching Nifty 50 Spot
-        ltp = nse_quote_ltp("NIFTY")
         data = nse_optionchain_scrapper("NIFTY")
-        return ltp, data['records']['data'], data['records']['expiryDates']
+        ltp = nse_quote_ltp("NIFTY")
+        return data['records']['data'], data['records']['expiryDates'], ltp
     except:
-        return 19500, [], [] # Fallback values
+        return [], [], 0
 
-ltp, records, expiries = get_data()
+records, expiries, nifty_spot = fetch_data()
 
-# --- TOP TRADING TOOLBAR ---
-with st.container():
-    st.markdown('<div class="trading-toolbar">', unsafe_allow_html=True)
-    cols = st.columns([1.5, 1.5, 1, 1, 1, 1.5])
+# --- TOP NAVIGATION ---
+st.title("⚡ Nifty Live Option Terminal")
+c1, c2, c3 = st.columns([1, 1, 2])
+selected_expiry = c1.selectbox("Select Expiry", expiries)
+c2.metric("NIFTY 50", nifty_spot)
+c3.metric("Available Margin", f"₹{st.session_state.balance:,.2f}")
+
+# --- PROCESS DATA FOR THE GRID ---
+# Filter data for the selected expiry and create a side-by-side view
+chain_list = []
+for r in records:
+    if r['expiryDate'] == selected_expiry:
+        # Keep strikes near the current spot price for better UI (ATM +/- 500 points)
+        if nifty_spot - 500 <= r['strikePrice'] <= nifty_spot + 500:
+            chain_list.append({
+                "CALL OI": r.get('CE', {}).get('openInterest', 0),
+                "CALL LTP": r.get('CE', {}).get('lastPrice', 0),
+                "STRIKE": r['strikePrice'],
+                "PUT LTP": r.get('PE', {}).get('lastPrice', 0),
+                "PUT OI": r.get('PE', {}).get('openInterest', 0),
+            })
+
+df_chain = pd.DataFrame(chain_list)
+
+# --- TRADING UI ---
+tab1, tab2 = st.tabs(["🔥 Live Option Chain", "💼 My Positions"])
+
+with tab1:
+    col_chain, col_order = st.columns([3, 1])
     
-    with cols[0]:
-        strike_select = st.selectbox("Strike", [r['strikePrice'] for r in records if r['strikePrice'] % 100 == 0], index=10)
-    with cols[1]:
-        expiry_select = st.selectbox("Expiry", expiries)
-    with cols[2]:
-        opt_type = st.radio("Type", ["CE", "PE"], horizontal=True)
-    with cols[3]:
-        qty = st.number_input("Qty", value=50, step=50)
-    
-    # Calculate current price for selected option
-    current_price = 0
-    for r in records:
-        if r['strikePrice'] == strike_select and r['expiryDate'] == expiry_select:
-            current_price = r.get(opt_type, {}).get('lastPrice', 0)
-    
-    with cols[4]:
-        st.metric("Premium", f"₹{current_price}")
+    with col_chain:
+        st.subheader(f"Option Chain: {selected_expiry}")
+        # Highlighting the Strike Price column
+        st.dataframe(
+            df_chain.style.background_gradient(subset=['CALL OI', 'PUT OI'], cmap='Blues')
+            .highlight_max(subset=['STRIKE'], color='lightgrey'),
+            use_container_width=True, height=500
+        )
         
-    with cols[5]:
-        st.write("") # Spacer
-        if st.button("🚀 EXECUTE BUY", use_container_width=True, type="primary"):
-            cost = current_price * qty
-            if st.session_state.balance >= cost:
-                st.session_state.balance -= cost
-                st.session_state.positions.append({
-                    "Symbol": f"NIFTY {strike_select} {opt_type}",
-                    "Qty": qty,
-                    "Entry": current_price,
-                    "Total": cost
-                })
-                st.toast(f"Order Executed: {qty} Qty of {strike_select} {opt_type}", icon="✅")
-            else:
-                st.error("Low Balance!")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# --- MAIN DASHBOARD AREA ---
-st.divider()
-
-col_left, col_right = st.columns([2, 1])
-
-with col_left:
-    st.subheader("📊 Active Portfolio")
-    if st.session_state.positions:
-        df = pd.DataFrame(st.session_state.positions)
-        st.table(df)
-        if st.button("Clear All Positions"):
-            st.session_state.positions = []
-            st.rerun()
-    else:
-        st.info("Your portfolio is empty. Use the toolbar above to Add/Buy options.")
-
-with col_right:
-    st.subheader("💰 Account Summary")
-    st.metric("Available Margin", f"₹{st.session_state.balance:,.2f}")
-    st.metric("NIFTY 50", f"{ltp}", delta="Live Spot")
-    
-    if st.button("Reset Funds"):
-        st.session_state.balance = 100000.0
-        st.rerun()
+    with col_order:
+        st.subheader("Place Trade")
+        with st.form("trade_form"):
+            side = st.radio("Side", ["CALL", "PUT"], horizontal=True)
+            strike = st.selectbox("Select Strike", df_chain['STRIKE'].tolist())
+            lots = st.number_input("Lots (1 Lot = 50)", min_value=1, value=1)
+            
+            # Find current price for the form selection
+            row = df_chain[df_chain['STRIKE'] == strike].iloc[0]
+            exec_price = row['CALL LTP'] if side == "CALL" else row['PUT LTP']
+            
+            st.info(f"Execution Price: ₹{exec_price}")
+            
+            if st.form_submit_button("BUY NOW", use_container_width=True, type="primary"):
+                total_cost = exec_price * lots * 50
+                if st.session_state.balance >= total_cost:
+                    st.session_state.balance -= total_cost
+                    st.session_state.portfolio.append({
+                        "Instrument
