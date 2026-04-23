@@ -78,5 +78,10 @@ with tab1:
                 total_cost = exec_price * lots * 50
                 if st.session_state.balance >= total_cost:
                     st.session_state.balance -= total_cost
-                    st.session_state.portfolio.append({
-                        "Instrument
+                  st.session_state.portfolio.append({
+                        "Instrument": f"NIFTY {strike} {side}",
+                        "Qty": lots * 50,
+                        "Avg Price": exec_price,
+                        "Current Price": exec_price,
+                        "P&L": 0.0
+                    })
