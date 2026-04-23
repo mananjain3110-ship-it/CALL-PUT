@@ -1,92 +1,84 @@
 import streamlit as st
 import pandas as pd
 from nsepython import nse_optionchain_scrapper, nse_quote_ltp
-import plotly.graph_objects as go
-import plotly.express as px
+import datetime
 
-# Set Page Config
-st.set_page_config(page_title="Nifty Option Chain Analyzer", layout="wide")
+# --- INITIALIZE SIMULATOR STATE ---
+if 'balance' not in st.session_state:
+    st.session_state.balance = 100000.0  # Starting Virtual Cash: ₹1 Lakh
+if 'positions' not in st.session_state:
+    st.session_state.positions = []      # Active Trades
+if 'history' not in st.session_state:
+    st.session_state.history = []        # Closed Trades
 
-st.title("📈 Nifty Index Option Chain & Market Trends")
+st.set_page_config(page_title="Nifty Live Simulator", layout="wide")
 
-def get_option_chain_data(symbol="NIFTY"):
-    # Scrape live data from NSE
-    data = nse_optionchain_scrapper(symbol)
-    
-    # Get Current Market Price (LTP)
-    ltp = nse_quote_ltp(symbol)
-    
-    # Process basic data
-    records = data['records']['data']
-    expiry_dates = data['records']['expiryDates']
-    
-    return records, expiry_dates, ltp
+# --- DATA FETCHING ---
+@st.cache_data(ttl=60) # Cache for 1 minute to avoid NSE blocking
+def fetch_live_data():
+    try:
+        data = nse_optionchain_scrapper("NIFTY")
+        ltp = nse_quote_ltp("NIFTY")
+        return data['records']['data'], ltp, data['records']['expiryDates']
+    except:
+        return None, None, None
 
-try:
-    # 1. Sidebar - Configuration
-    st.sidebar.header("Settings")
-    symbol = st.sidebar.selectbox("Select Index", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
-    
-    # Fetch Data
-    records, expiry_dates, ltp = get_option_chain_data(symbol)
-    
-    selected_expiry = st.sidebar.selectbox("Select Expiry Date", expiry_dates)
-    
-    # 2. Key Market Indicators
-    col1, col2, col3 = st.columns(3)
-    
-    # Filter data for selected expiry
-    filtered_data = [r for r in records if r['expiryDate'] == selected_expiry]
-    
-    # Calculate PCR (Put-Call Ratio)
-    total_ce_oi = sum([r['CE']['openInterest'] for r in filtered_data if 'CE' in r])
-    total_pe_oi = sum([r['PE']['openInterest'] for r in filtered_data if 'PE' in r])
-    pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 0
-    
-    col1.metric(f"{symbol} LTP", f"₹{ltp}")
-    col2.metric("Put-Call Ratio (OI)", pcr, delta="Bullish" if pcr > 1 else "Bearish")
-    col3.metric("Selected Expiry", selected_expiry)
+records, ltp, expiry_dates = fetch_live_data()
 
-    # 3. Market Trends & Visualization
-    st.subheader("Open Interest (OI) Analysis")
-    
-    # Prepare DataFrame for Plotting
-    plot_data = []
-    for r in filtered_data:
-        strike = r['strikePrice']
-        if 'CE' in r:
-            plot_data.append({'Strike': strike, 'OI': r['CE']['openInterest'], 'Type': 'Call (CE)', 'Color': 'red'})
-        if 'PE' in r:
-            plot_data.append({'Strike': strike, 'OI': r['PE']['openInterest'], 'Type': 'Put (PE)', 'Color': 'green'})
-            
-    df_oi = pd.DataFrame(plot_data)
-    
-    # Create Bar Chart for OI
-    fig_oi = px.bar(df_oi, x='Strike', y='OI', color='Type', 
-                   barmode='group', title="Open Interest by Strike Price",
-                   color_discrete_map={'Call (CE)': '#EF553B', 'Put (PE)': '#00CC96'})
-    
-    # Add vertical line for Current Price
-    fig_oi.add_vline(x=ltp, line_dash="dash", line_color="blue", annotation_text="At The Money (ATM)")
-    
-    st.plotly_chart(fig_oi, use_container_width=True)
+# --- TOP BAR: PORTFOLIO SUMMARY ---
+st.title("💸 Nifty Options Paper Trading Simulator")
+c1, c2, c3 = st.columns(3)
+c1.metric("Virtual Balance", f"₹{st.session_state.balance:,.2f}")
+c2.metric("Active Positions", len(st.session_state.positions))
+c3.metric("Nifty Spot", f"₹{ltp}")
 
-    # 4. Detailed Option Chain Table
-    st.subheader("Live Option Chain Table")
-    
-    rows = []
-    for r in filtered_data:
-        row = {
-            "Strike": r['strikePrice'],
-            "Call_OI": r.get('CE', {}).get('openInterest', 0),
-            "Call_LTP": r.get('CE', {}).get('lastPrice', 0),
-            "Put_LTP": r.get('PE', {}).get('lastPrice', 0),
-            "Put_OI": r.get('PE', {}).get('openInterest', 0),
-        }
-        rows.append(row)
-    
-    df_table = pd.DataFrame(rows)
-    st.dataframe(df_table.style.background_gradient(subset=['Call_OI', 'Put_OI'], cmap='YlGn'), use_container_width=True)
+# --- TRADING PANEL ---
+st.sidebar.header("🕹️ Place a Trade")
+if records:
+    exp_date = st.sidebar.selectbox("Expiry", expiry_dates)
+    strike = st.sidebar.number_input("Strike Price", value=int(round(ltp/50)*50), step=50)
+    opt_type = st.sidebar.radio("Option Type", ["CE", "PE"])
+    qty = st.sidebar.number_input("Quantity (Lot Size: 50)", min_value=50, step=50)
 
-except Exception as e:
-    st.error(f"Error fetching data: {e}. Ensure you have a stable internet connection and NSE website is accessible.")
+    # Find the current price for the selected strike
+    current_opt_price = 0
+    for r in records:
+        if r['strikePrice'] == strike and r['expiryDate'] == exp_date:
+            current_opt_price = r.get(opt_type, {}).get('lastPrice', 0)
+
+    st.sidebar.write(f"**Current Premium:** ₹{current_opt_price}")
+    
+    if st.sidebar.button("Execute BUY Order"):
+        total_cost = current_opt_price * qty
+        if st.session_state.balance >= total_cost:
+            st.session_state.balance -= total_cost
+            st.session_state.positions.append({
+                "strike": strike, "type": opt_type, "qty": qty, 
+                "buy_price": current_opt_price, "time": datetime.datetime.now().strftime("%H:%M:%S")
+            })
+            st.sidebar.success(f"Bought {qty} {opt_type} at ₹{current_opt_price}")
+        else:
+            st.sidebar.error("Insufficient Balance!")
+
+# --- ACTIVE POSITIONS ---
+st.subheader("📁 Open Positions")
+if st.session_state.positions:
+    pos_df = pd.DataFrame(st.session_state.positions)
+    # Calculate Live P&L
+    temp_pnl = 0
+    for i, pos in enumerate(st.session_state.positions):
+        # In a real app, you'd fetch the latest LTP here again for real-time P&L
+        st.write(f"**{pos['qty']} Qty** of **{pos['strike']} {pos['type']}** bought at **₹{pos['buy_price']}**")
+        if st.button(f"Square Off Position {i+1}"):
+            # Simple sell logic at same price for demo (or refetch latest)
+            st.session_state.balance += (pos['buy_price'] * pos['qty']) 
+            st.session_state.positions.pop(i)
+            st.rerun()
+else:
+    st.info("No active trades. Use the sidebar to place your first order.")
+
+st.divider()
+if st.button("Reset Simulator"):
+    st.session_state.balance = 100000.0
+    st.session_state.positions = []
+    st.rerun()
