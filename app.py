@@ -3,82 +3,105 @@ import pandas as pd
 from nsepython import nse_optionchain_scrapper, nse_quote_ltp
 import datetime
 
-# --- INITIALIZE SIMULATOR STATE ---
-if 'balance' not in st.session_state:
-    st.session_state.balance = 100000.0  # Starting Virtual Cash: ₹1 Lakh
-if 'positions' not in st.session_state:
-    st.session_state.positions = []      # Active Trades
-if 'history' not in st.session_state:
-    st.session_state.history = []        # Closed Trades
-
+# --- CONFIG & STATE ---
 st.set_page_config(page_title="Nifty Live Simulator", layout="wide")
 
-# --- DATA FETCHING ---
-@st.cache_data(ttl=60) # Cache for 1 minute to avoid NSE blocking
-def fetch_live_data():
-    try:
-        data = nse_optionchain_scrapper("NIFTY")
-        ltp = nse_quote_ltp("NIFTY")
-        return data['records']['data'], ltp, data['records']['expiryDates']
-    except:
-        return None, None, None
-
-records, ltp, expiry_dates = fetch_live_data()
-
-# --- TOP BAR: PORTFOLIO SUMMARY ---
-st.title("💸 Nifty Options Paper Trading Simulator")
-c1, c2, c3 = st.columns(3)
-c1.metric("Virtual Balance", f"₹{st.session_state.balance:,.2f}")
-c2.metric("Active Positions", len(st.session_state.positions))
-c3.metric("Nifty Spot", f"₹{ltp}")
-
-# --- TRADING PANEL ---
-st.sidebar.header("🕹️ Place a Trade")
-if records:
-    exp_date = st.sidebar.selectbox("Expiry", expiry_dates)
-    strike = st.sidebar.number_input("Strike Price", value=int(round(ltp/50)*50), step=50)
-    opt_type = st.sidebar.radio("Option Type", ["CE", "PE"])
-    qty = st.sidebar.number_input("Quantity (Lot Size: 50)", min_value=50, step=50)
-
-    # Find the current price for the selected strike
-    current_opt_price = 0
-    for r in records:
-        if r['strikePrice'] == strike and r['expiryDate'] == exp_date:
-            current_opt_price = r.get(opt_type, {}).get('lastPrice', 0)
-
-    st.sidebar.write(f"**Current Premium:** ₹{current_opt_price}")
-    
-    if st.sidebar.button("Execute BUY Order"):
-        total_cost = current_opt_price * qty
-        if st.session_state.balance >= total_cost:
-            st.session_state.balance -= total_cost
-            st.session_state.positions.append({
-                "strike": strike, "type": opt_type, "qty": qty, 
-                "buy_price": current_opt_price, "time": datetime.datetime.now().strftime("%H:%M:%S")
-            })
-            st.sidebar.success(f"Bought {qty} {opt_type} at ₹{current_opt_price}")
-        else:
-            st.sidebar.error("Insufficient Balance!")
-
-# --- ACTIVE POSITIONS ---
-st.subheader("📁 Open Positions")
-if st.session_state.positions:
-    pos_df = pd.DataFrame(st.session_state.positions)
-    # Calculate Live P&L
-    temp_pnl = 0
-    for i, pos in enumerate(st.session_state.positions):
-        # In a real app, you'd fetch the latest LTP here again for real-time P&L
-        st.write(f"**{pos['qty']} Qty** of **{pos['strike']} {pos['type']}** bought at **₹{pos['buy_price']}**")
-        if st.button(f"Square Off Position {i+1}"):
-            # Simple sell logic at same price for demo (or refetch latest)
-            st.session_state.balance += (pos['buy_price'] * pos['qty']) 
-            st.session_state.positions.pop(i)
-            st.rerun()
-else:
-    st.info("No active trades. Use the sidebar to place your first order.")
-
-st.divider()
-if st.button("Reset Simulator"):
+if 'balance' not in st.session_state:
     st.session_state.balance = 100000.0
+if 'positions' not in st.session_state:
     st.session_state.positions = []
-    st.rerun()
+
+# CSS to inject for the "Sticky" Toolbar
+st.markdown("""
+    <style>
+    .stAppHeader {
+        background-color: #f0f2f6;
+    }
+    div[data-testid="stVerticalBlock"] > div:has(div.trading-toolbar) {
+        position: sticky;
+        top: 2.8rem;
+        z-index: 999;
+        background: white;
+        padding: 10px;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- LIVE DATA FETCH ---
+def get_data():
+    try:
+        # Fetching Nifty 50 Spot
+        ltp = nse_quote_ltp("NIFTY")
+        data = nse_optionchain_scrapper("NIFTY")
+        return ltp, data['records']['data'], data['records']['expiryDates']
+    except:
+        return 19500, [], [] # Fallback values
+
+ltp, records, expiries = get_data()
+
+# --- TOP TRADING TOOLBAR ---
+with st.container():
+    st.markdown('<div class="trading-toolbar">', unsafe_allow_html=True)
+    cols = st.columns([1.5, 1.5, 1, 1, 1, 1.5])
+    
+    with cols[0]:
+        strike_select = st.selectbox("Strike", [r['strikePrice'] for r in records if r['strikePrice'] % 100 == 0], index=10)
+    with cols[1]:
+        expiry_select = st.selectbox("Expiry", expiries)
+    with cols[2]:
+        opt_type = st.radio("Type", ["CE", "PE"], horizontal=True)
+    with cols[3]:
+        qty = st.number_input("Qty", value=50, step=50)
+    
+    # Calculate current price for selected option
+    current_price = 0
+    for r in records:
+        if r['strikePrice'] == strike_select and r['expiryDate'] == expiry_select:
+            current_price = r.get(opt_type, {}).get('lastPrice', 0)
+    
+    with cols[4]:
+        st.metric("Premium", f"₹{current_price}")
+        
+    with cols[5]:
+        st.write("") # Spacer
+        if st.button("🚀 EXECUTE BUY", use_container_width=True, type="primary"):
+            cost = current_price * qty
+            if st.session_state.balance >= cost:
+                st.session_state.balance -= cost
+                st.session_state.positions.append({
+                    "Symbol": f"NIFTY {strike_select} {opt_type}",
+                    "Qty": qty,
+                    "Entry": current_price,
+                    "Total": cost
+                })
+                st.toast(f"Order Executed: {qty} Qty of {strike_select} {opt_type}", icon="✅")
+            else:
+                st.error("Low Balance!")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# --- MAIN DASHBOARD AREA ---
+st.divider()
+
+col_left, col_right = st.columns([2, 1])
+
+with col_left:
+    st.subheader("📊 Active Portfolio")
+    if st.session_state.positions:
+        df = pd.DataFrame(st.session_state.positions)
+        st.table(df)
+        if st.button("Clear All Positions"):
+            st.session_state.positions = []
+            st.rerun()
+    else:
+        st.info("Your portfolio is empty. Use the toolbar above to Add/Buy options.")
+
+with col_right:
+    st.subheader("💰 Account Summary")
+    st.metric("Available Margin", f"₹{st.session_state.balance:,.2f}")
+    st.metric("NIFTY 50", f"{ltp}", delta="Live Spot")
+    
+    if st.button("Reset Funds"):
+        st.session_state.balance = 100000.0
+        st.rerun()
